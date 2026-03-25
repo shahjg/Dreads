@@ -11,7 +11,6 @@ app.get('/', (req, res) => {
   res.sendFile(__dirname + '/public/index.html');
 });
 
-// Helper to make URLs absolute
 function toAbsolute(url, origin) {
   if (!url) return null;
   if (url.startsWith('//')) return `https:${url}`;
@@ -20,25 +19,31 @@ function toAbsolute(url, origin) {
   return url;
 }
 
-// Process HTML with cheerio — strip junk, fix links/images
 function processHTML(data, targetUrl, base) {
   const $ = cheerio.load(data);
 
   $('base').remove();
 
-  // Strip junk
+  // Only strip ad/paywall/cookie junk — leave interactive scripts alone
   const removeSelectors = [
-    'script', 'iframe', 'noscript',
     '[class*="ad-"]', '[id*="ad"]', '[class*="-ad"]',
-    '[class*="popup"]', '[class*="modal"]', '[class*="overlay"]',
+    '[class*="popup"]',
     '[class*="paywall"]', '[class*="subscribe"]', '[class*="subscription"]',
     '[class*="cookie"]', '[class*="gdpr"]', '[class*="consent"]',
-    '[class*="newsletter"]', '[class*="signup"]',
-    '[class*="sticky"]', '[class*="fixed-"]',
+    '[class*="newsletter"]',
     '[id*="paywall"]', '[id*="subscribe"]', '[id*="popup"]',
     '.adsbygoogle', '[data-ad]', '[aria-label*="advertisement"]',
+    'iframe',
   ];
   $(removeSelectors.join(',')).remove();
+
+  // Only remove ad/tracking scripts, keep functional ones
+  $('script').each((_, el) => {
+    const src = $(el).attr('src') || '';
+    const content = $(el).html() || '';
+    const isAd = /googletag|doubleclick|amazon-adsystem|adsbygoogle|scorecardresearch|outbrain|taboola|chartbeat|quantserve|comscore|Nielsen|permutive|smartadserver|pubmatic|rubiconproject|openx|appnexus|criteo/.test(src + content);
+    if (isAd) $(el).remove();
+  });
 
   // Fix images
   $('img').each((_, el) => {
@@ -78,10 +83,28 @@ function processHTML(data, targetUrl, base) {
     $(el).attr('style', fixed);
   });
 
+  // Fix stylesheet links
+  $('link[rel="stylesheet"]').each((_, el) => {
+    const href = $(el).attr('href');
+    if (href) {
+      const absolute = toAbsolute(href, base.origin);
+      if (absolute) $(el).attr('href', absolute);
+    }
+  });
+
+  // Fix script src URLs so they load correctly
+  $('script[src]').each((_, el) => {
+    const src = $(el).attr('src');
+    if (src) {
+      const absolute = toAbsolute(src, base.origin);
+      if (absolute) $(el).attr('src', absolute);
+    }
+  });
+
   // Rewrite links
   $('a').each((_, el) => {
     let href = $(el).attr('href');
-    if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+    if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) return;
     const absolute = toAbsolute(href, base.origin);
     if (absolute) {
       $(el).attr('href', `/proxy?url=${encodeURIComponent(absolute)}`);
@@ -89,30 +112,55 @@ function processHTML(data, targetUrl, base) {
     }
   });
 
-  // Fix forms — route GET search forms back through DReads
+  // Fix forms — restore action to original site so search works natively
   $('form').each((_, el) => {
     let action = $(el).attr('action') || `${base.origin}/`;
     action = toAbsolute(action, base.origin) || action;
-    const method = ($(el).attr('method') || 'get').toLowerCase();
-    if (method === 'get') {
-      $(el).attr('action', `/proxy`);
-      $(el).append(`<input type="hidden" name="url" value="${action}">`);
-    } else {
-      $(el).attr('action', action);
-    }
+    $(el).attr('action', action);
   });
 
-  // Inject clean styles
+  // Inject styles
   $('head').append(`
     <style>
       * { filter: none !important; -webkit-filter: none !important; }
-      [class*="paywall"], [class*="blur"], [class*="gate"], [class*="overlay"],
-      [class*="modal"], [class*="subscribe"], [class*="cookie"], [class*="consent"],
+      [class*="paywall"], [class*="blur"], [class*="gate"],
+      [class*="subscribe"], [class*="cookie"], [class*="consent"],
       [style*="blur"] { display: none !important; visibility: hidden !important; }
       body { overflow: auto !important; position: static !important; }
-      html, body { max-width: 100% !important; }
-      img { display: block !important; }
+      img { max-width: 100% !important; }
     </style>
+  `);
+
+  // Inject a script to rewrite any navigation that happens via JS
+  $('body').append(`
+    <script>
+      // Intercept all client-side navigations back through DReads
+      const _pushState = history.pushState.bind(history);
+      const _replaceState = history.replaceState.bind(history);
+      function rewriteNav(url) {
+        if (!url) return url;
+        const str = url.toString();
+        if (str.startsWith('http') && !str.startsWith(window.location.origin)) {
+          return '/proxy?url=' + encodeURIComponent(str);
+        }
+        if (str.startsWith('/') && !str.startsWith('/proxy')) {
+          return '/proxy?url=' + encodeURIComponent('${base.origin}' + str);
+        }
+        return url;
+      }
+      history.pushState = (state, title, url) => _pushState(state, title, rewriteNav(url));
+      history.replaceState = (state, title, url) => _replaceState(state, title, rewriteNav(url));
+      document.addEventListener('click', (e) => {
+        const a = e.target.closest('a');
+        if (!a) return;
+        const href = a.getAttribute('href');
+        if (!href || href.startsWith('#') || href.startsWith('/proxy') || href.startsWith('mailto:')) return;
+        e.preventDefault();
+        let absolute = href;
+        if (href.startsWith('/')) absolute = '${base.origin}' + href;
+        window.location.href = '/proxy?url=' + encodeURIComponent(absolute);
+      });
+    </script>
   `);
 
   // Inject toolbar
@@ -144,25 +192,18 @@ app.get('/proxy', async (req, res) => {
 
     let html;
 
-    // Try Puppeteer first for JS-heavy pages, fall back to axios
     try {
       const puppeteer = require('puppeteer');
       const browser = await puppeteer.launch({
         headless: 'new',
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-        ]
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
       });
       const page = await browser.newPage();
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36');
       await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 15000 });
       html = await page.content();
       await browser.close();
-    } catch (puppeteerErr) {
-      // Puppeteer not available, fall back to axios
+    } catch (e) {
       const { data } = await axios.get(targetUrl, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
@@ -176,8 +217,7 @@ app.get('/proxy', async (req, res) => {
       html = data;
     }
 
-    const processed = processHTML(html, targetUrl, base);
-    res.send(processed);
+    res.send(processHTML(html, targetUrl, base));
 
   } catch (err) {
     res.status(500).send(`
