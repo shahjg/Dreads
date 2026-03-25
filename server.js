@@ -2,7 +2,6 @@ const express = require('express');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const session = require('express-session');
-const path = require('path');
 
 const app = express();
 
@@ -12,148 +11,173 @@ app.get('/', (req, res) => {
   res.sendFile(__dirname + '/public/index.html');
 });
 
+// Helper to make URLs absolute
+function toAbsolute(url, origin) {
+  if (!url) return null;
+  if (url.startsWith('//')) return `https:${url}`;
+  if (url.startsWith('/')) return `${origin}${url}`;
+  if (!url.startsWith('http')) return `${origin}/${url}`;
+  return url;
+}
+
+// Process HTML with cheerio — strip junk, fix links/images
+function processHTML(data, targetUrl, base) {
+  const $ = cheerio.load(data);
+
+  $('base').remove();
+
+  // Strip junk
+  const removeSelectors = [
+    'script', 'iframe', 'noscript',
+    '[class*="ad-"]', '[id*="ad"]', '[class*="-ad"]',
+    '[class*="popup"]', '[class*="modal"]', '[class*="overlay"]',
+    '[class*="paywall"]', '[class*="subscribe"]', '[class*="subscription"]',
+    '[class*="cookie"]', '[class*="gdpr"]', '[class*="consent"]',
+    '[class*="newsletter"]', '[class*="signup"]',
+    '[class*="sticky"]', '[class*="fixed-"]',
+    '[id*="paywall"]', '[id*="subscribe"]', '[id*="popup"]',
+    '.adsbygoogle', '[data-ad]', '[aria-label*="advertisement"]',
+  ];
+  $(removeSelectors.join(',')).remove();
+
+  // Fix images
+  $('img').each((_, el) => {
+    const src = $(el).attr('data-src')
+      || $(el).attr('data-lazy-src')
+      || $(el).attr('data-original')
+      || $(el).attr('data-img-src')
+      || $(el).attr('src');
+    if (src) {
+      const absolute = toAbsolute(src, base.origin);
+      if (absolute) $(el).attr('src', absolute);
+      $(el).removeAttr('data-src');
+      $(el).removeAttr('data-lazy-src');
+      $(el).removeAttr('loading');
+    }
+  });
+
+  // Fix srcset
+  $('img[srcset], source[srcset]').each((_, el) => {
+    const srcset = $(el).attr('srcset');
+    if (srcset) {
+      const fixed = srcset.split(',').map(s => {
+        const parts = s.trim().split(/\s+/);
+        if (parts[0]) parts[0] = toAbsolute(parts[0], base.origin) || parts[0];
+        return parts.join(' ');
+      }).join(', ');
+      $(el).attr('srcset', fixed);
+    }
+  });
+
+  // Fix background images in style attrs
+  $('[style]').each((_, el) => {
+    const style = $(el).attr('style') || '';
+    const fixed = style.replace(/url\(['"]?(\/[^'")\s]+)['"]?\)/g, (_, p1) => {
+      return `url('${base.origin}${p1}')`;
+    });
+    $(el).attr('style', fixed);
+  });
+
+  // Rewrite links
+  $('a').each((_, el) => {
+    let href = $(el).attr('href');
+    if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
+    const absolute = toAbsolute(href, base.origin);
+    if (absolute) {
+      $(el).attr('href', `/proxy?url=${encodeURIComponent(absolute)}`);
+      $(el).removeAttr('target');
+    }
+  });
+
+  // Fix forms — route GET search forms back through DReads
+  $('form').each((_, el) => {
+    let action = $(el).attr('action') || `${base.origin}/`;
+    action = toAbsolute(action, base.origin) || action;
+    const method = ($(el).attr('method') || 'get').toLowerCase();
+    if (method === 'get') {
+      $(el).attr('action', `/proxy`);
+      $(el).append(`<input type="hidden" name="url" value="${action}">`);
+    } else {
+      $(el).attr('action', action);
+    }
+  });
+
+  // Inject clean styles
+  $('head').append(`
+    <style>
+      * { filter: none !important; -webkit-filter: none !important; }
+      [class*="paywall"], [class*="blur"], [class*="gate"], [class*="overlay"],
+      [class*="modal"], [class*="subscribe"], [class*="cookie"], [class*="consent"],
+      [style*="blur"] { display: none !important; visibility: hidden !important; }
+      body { overflow: auto !important; position: static !important; }
+      html, body { max-width: 100% !important; }
+      img { display: block !important; }
+    </style>
+  `);
+
+  // Inject toolbar
+  $('body').prepend(`
+    <div id="dreads-toolbar" style="
+      position: sticky; top: 0; z-index: 99999;
+      background: #1c1108; color: #f0e6d0;
+      padding: 10px 24px; display: flex; align-items: center;
+      gap: 14px; font-family: 'Jost', -apple-system, sans-serif;
+      font-size: 13px; border-bottom: 1px solid rgba(229,205,168,0.1);
+      box-shadow: 0 2px 16px rgba(0,0,0,0.5);
+    ">
+      <a href="/" style="color: #d4a97a; text-decoration: none; font-weight: 500; letter-spacing: 0.08em; font-size: 12px; text-transform: uppercase; white-space: nowrap;">← DReads</a>
+      <span style="flex:1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(240,230,208,0.28); font-size: 11px;">${targetUrl}</span>
+      <a href="${targetUrl}" target="_blank" style="color: rgba(240,230,208,0.3); text-decoration: none; font-size: 11px; white-space: nowrap; letter-spacing: 0.04em;">original ↗</a>
+    </div>
+  `);
+
+  return $.html();
+}
+
 app.get('/proxy', async (req, res) => {
   try {
     const targetUrl = req.query.url;
     if (!targetUrl) return res.redirect('/');
 
     const base = new URL(targetUrl);
-    req.session.baseDomain = base.origin;
     req.session.lastUrl = targetUrl;
 
-    const { data } = await axios.get(targetUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://www.google.com/',
-      },
-      timeout: 12000,
-      maxRedirects: 5
-    });
+    let html;
 
-    const $ = cheerio.load(data);
-
-    // Remove base tag — breaks link rewriting
-    $('base').remove();
-
-    // Strip all junk
-    const removeSelectors = [
-      'script', 'iframe', 'noscript',
-      '[class*="ad-"]', '[id*="ad"]', '[class*="-ad"]',
-      '[class*="popup"]', '[class*="modal"]', '[class*="overlay"]',
-      '[class*="paywall"]', '[class*="subscribe"]', '[class*="subscription"]',
-      '[class*="cookie"]', '[class*="gdpr"]', '[class*="consent"]',
-      '[class*="newsletter"]', '[class*="signup"]',
-      '[class*="sticky"]', '[class*="fixed-"]',
-      '[id*="paywall"]', '[id*="subscribe"]', '[id*="popup"]',
-      '.adsbygoogle', '[data-ad]', '[aria-label*="advertisement"]',
-    ];
-    $(removeSelectors.join(',')).remove();
-
-    // Fix images — handle lazy loaded ones
-    $('img').each((_, el) => {
-      const src = $(el).attr('data-src')
-        || $(el).attr('data-lazy-src')
-        || $(el).attr('data-original')
-        || $(el).attr('data-img-src')
-        || $(el).attr('src');
-
-      if (src) {
-        let absolute = src;
-        if (src.startsWith('//')) absolute = `https:${src}`;
-        else if (src.startsWith('/')) absolute = `${base.origin}${src}`;
-        $(el).attr('src', absolute);
-        $(el).removeAttr('data-src');
-        $(el).removeAttr('data-lazy-src');
-        $(el).removeAttr('loading');
-      }
-    });
-
-    // Fix srcset
-    $('img[srcset], source[srcset]').each((_, el) => {
-      const srcset = $(el).attr('srcset');
-      if (srcset) {
-        const fixed = srcset.split(',').map(s => {
-          const parts = s.trim().split(/\s+/);
-          if (parts[0]) {
-            if (parts[0].startsWith('//')) parts[0] = `https:${parts[0]}`;
-            else if (parts[0].startsWith('/')) parts[0] = `${base.origin}${parts[0]}`;
-          }
-          return parts.join(' ');
-        }).join(', ');
-        $(el).attr('srcset', fixed);
-      }
-    });
-
-    // Fix CSS background images in style attributes
-    $('[style]').each((_, el) => {
-      const style = $(el).attr('style') || '';
-      const fixed = style.replace(/url\(['"]?(\/[^'")\s]+)['"]?\)/g, (_, p1) => {
-        return `url('${base.origin}${p1}')`;
+    // Try Puppeteer first for JS-heavy pages, fall back to axios
+    try {
+      const puppeteer = require('puppeteer');
+      const browser = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+        ]
       });
-      $(el).attr('style', fixed);
-    });
+      const page = await browser.newPage();
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36');
+      await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 15000 });
+      html = await page.content();
+      await browser.close();
+    } catch (puppeteerErr) {
+      // Puppeteer not available, fall back to axios
+      const { data } = await axios.get(targetUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer': 'https://www.google.com/',
+        },
+        timeout: 12000,
+        maxRedirects: 5
+      });
+      html = data;
+    }
 
-    // Rewrite links through proxy
-    $('a').each((_, el) => {
-      let href = $(el).attr('href');
-      if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
-
-      if (href.startsWith('//')) href = `https:${href}`;
-      else if (href.startsWith('/')) href = `${base.origin}${href}`;
-      else if (!href.startsWith('http')) href = `${base.origin}/${href}`;
-
-      $(el).attr('href', `/proxy?url=${encodeURIComponent(href)}`);
-      $(el).removeAttr('target');
-    });
-
-    // Fix form actions — restore to original site so search works correctly
-    $('form').each((_, el) => {
-      let action = $(el).attr('action');
-      if (!action) {
-        $(el).attr('action', `${base.origin}/`);
-        return;
-      }
-      if (action.startsWith('//')) action = `https:${action}`;
-      else if (action.startsWith('/')) action = `${base.origin}${action}`;
-      else if (!action.startsWith('http')) action = `${base.origin}/${action}`;
-      $(el).attr('action', action);
-    });
-
-    // Inject clean styles
-    $('head').append(`
-      <style>
-        * { filter: none !important; -webkit-filter: none !important; }
-        [class*="paywall"], [class*="blur"], [class*="gate"], [class*="overlay"],
-        [class*="modal"], [class*="subscribe"], [class*="cookie"], [class*="consent"],
-        [style*="blur"] {
-          display: none !important;
-          visibility: hidden !important;
-        }
-        body { overflow: auto !important; position: static !important; }
-        html, body { max-width: 100% !important; }
-        img { display: block !important; }
-      </style>
-    `);
-
-    // Inject DReads toolbar
-    $('body').prepend(`
-      <div id="dreads-toolbar" style="
-        position: sticky; top: 0; z-index: 99999;
-        background: #1c1108; color: #f0e6d0;
-        padding: 10px 24px; display: flex; align-items: center;
-        gap: 14px; font-family: 'Jost', -apple-system, sans-serif;
-        font-size: 13px; border-bottom: 1px solid rgba(229,205,168,0.1);
-        box-shadow: 0 2px 16px rgba(0,0,0,0.5);
-      ">
-        <a href="/" style="color: #d4a97a; text-decoration: none; font-weight: 500; letter-spacing: 0.08em; font-size: 12px; text-transform: uppercase; white-space: nowrap;">← DReads</a>
-        <span style="flex:1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: rgba(240,230,208,0.28); font-size: 11px;">${targetUrl}</span>
-        <a href="${targetUrl}" target="_blank" style="color: rgba(240,230,208,0.3); text-decoration: none; font-size: 11px; white-space: nowrap; letter-spacing: 0.04em;">original ↗</a>
-      </div>
-    `);
-
-    res.send($.html());
+    const processed = processHTML(html, targetUrl, base);
+    res.send(processed);
 
   } catch (err) {
     res.status(500).send(`
