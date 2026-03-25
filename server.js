@@ -6,10 +6,11 @@ const path = require('path');
 
 const app = express();
 
+app.use(session({ secret: 'dreads-key', resave: false, saveUninitialized: true }));
+
 app.get('/', (req, res) => {
   res.sendFile(__dirname + '/public/index.html');
 });
-app.use(session({ secret: 'dreads-key', resave: false, saveUninitialized: true }));
 
 app.get('/proxy', async (req, res) => {
   try {
@@ -33,7 +34,7 @@ app.get('/proxy', async (req, res) => {
 
     const $ = cheerio.load(data);
 
-    // Remove base tag — it breaks our link rewriting
+    // Remove base tag — breaks link rewriting
     $('base').remove();
 
     // Strip all junk
@@ -50,9 +51,8 @@ app.get('/proxy', async (req, res) => {
     ];
     $(removeSelectors.join(',')).remove();
 
-    // Fix ALL image sources including lazy loaded ones
+    // Fix images — handle lazy loaded ones
     $('img').each((_, el) => {
-      // Try every possible image attribute
       const src = $(el).attr('data-src')
         || $(el).attr('data-lazy-src')
         || $(el).attr('data-original')
@@ -66,7 +66,7 @@ app.get('/proxy', async (req, res) => {
         $(el).attr('src', absolute);
         $(el).removeAttr('data-src');
         $(el).removeAttr('data-lazy-src');
-        $(el).removeAttr('loading'); // remove lazy loading
+        $(el).removeAttr('loading');
       }
     });
 
@@ -89,25 +89,36 @@ app.get('/proxy', async (req, res) => {
     // Fix CSS background images in style attributes
     $('[style]').each((_, el) => {
       const style = $(el).attr('style') || '';
-      const fixed = style.replace(/url\(['"]?(\/[^'")\s]+)['"]?\)/g, (match, p1) => {
+      const fixed = style.replace(/url\(['"]?(\/[^'")\s]+)['"]?\)/g, (_, p1) => {
         return `url('${base.origin}${p1}')`;
       });
       $(el).attr('style', fixed);
     });
 
-    // Rewrite ALL links — handle relative, absolute, and protocol-relative
+    // Rewrite links through proxy
     $('a').each((_, el) => {
       let href = $(el).attr('href');
       if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:')) return;
 
-      // Convert to absolute
       if (href.startsWith('//')) href = `https:${href}`;
       else if (href.startsWith('/')) href = `${base.origin}${href}`;
       else if (!href.startsWith('http')) href = `${base.origin}/${href}`;
 
-      // Route through proxy
       $(el).attr('href', `/proxy?url=${encodeURIComponent(href)}`);
-      $(el).removeAttr('target'); // prevent opening in new tab
+      $(el).removeAttr('target');
+    });
+
+    // Fix form actions — restore to original site so search works correctly
+    $('form').each((_, el) => {
+      let action = $(el).attr('action');
+      if (!action) {
+        $(el).attr('action', `${base.origin}/`);
+        return;
+      }
+      if (action.startsWith('//')) action = `https:${action}`;
+      else if (action.startsWith('/')) action = `${base.origin}${action}`;
+      else if (!action.startsWith('http')) action = `${base.origin}/${action}`;
+      $(el).attr('action', action);
     });
 
     // Inject clean styles
