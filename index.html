@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DReads</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;1,400&family=Jost:wght@300;400;500&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #1c1108;
+      --surface: #251810;
+      --border: rgba(229,205,168,0.09);
+      --border-hover: rgba(229,205,168,0.2);
+      --text: #f0e6d0;
+      --muted: rgba(240,230,208,0.38);
+      --accent: #b8845a;
+      --accent-light: #d4a97a;
+      --cream: #f5ead8;
+      --cream-dim: rgba(245,234,216,0.06);
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Jost', sans-serif;
+      font-weight: 300;
+    }
+
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% 0%, rgba(120,70,30,0.18) 0%, transparent 70%),
+        radial-gradient(ellipse 60% 40% at 80% 100%, rgba(90,50,20,0.12) 0%, transparent 60%);
+    }
+
+    .page {
+      position: relative; z-index: 1;
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 2rem;
+    }
+
+    .wordmark {
+      display: flex; align-items: baseline; gap: 2px;
+      margin-bottom: 0.5rem;
+    }
+
+    .wordmark-d {
+      font-family: 'Playfair Display', serif;
+      font-size: clamp(64px, 10vw, 108px);
+      font-weight: 400;
+      color: var(--accent-light);
+      line-height: 1;
+      letter-spacing: -3px;
+    }
+
+    .wordmark-reads {
+      font-family: 'Playfair Display', serif;
+      font-size: clamp(64px, 10vw, 108px);
+      font-weight: 400;
+      font-style: italic;
+      color: var(--cream);
+      line-height: 1;
+      letter-spacing: -2px;
+    }
+
+    .tagline {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      margin-bottom: 3.5rem;
+      font-weight: 400;
+    }
+
+    .search-wrap { width: 100%; max-width: 580px; }
+
+    .search-inner {
+      display: flex;
+      align-items: center;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 7px 7px 7px 22px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .search-inner:focus-within {
+      border-color: rgba(184,132,90,0.4);
+      box-shadow: 0 0 0 4px rgba(184,132,90,0.07);
+    }
+
+    #url-input {
+      flex: 1;
+      background: transparent;
+      border: none; outline: none;
+      font-family: 'Jost', sans-serif;
+      font-size: 14px; font-weight: 300;
+      color: var(--text);
+      min-width: 0;
+    }
+
+    #url-input::placeholder { color: var(--muted); }
+
+    .go-btn {
+      background: var(--accent);
+      color: #1c1108;
+      border: none;
+      border-radius: 11px;
+      padding: 11px 22px;
+      font-family: 'Jost', sans-serif;
+      font-size: 12px; font-weight: 500;
+      cursor: pointer;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      transition: background 0.15s, transform 0.1s;
+      white-space: nowrap;
+    }
+
+    .go-btn:hover { background: var(--accent-light); }
+    .go-btn:active { transform: scale(0.97); }
+
+    .hints {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      margin-top: 14px; justify-content: center;
+    }
+
+    .hint {
+      font-size: 11px; color: var(--muted);
+      background: var(--cream-dim);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 5px 14px;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+      letter-spacing: 0.04em;
+    }
+
+    .hint:hover {
+      border-color: rgba(184,132,90,0.35);
+      color: var(--accent-light);
+      background: rgba(184,132,90,0.07);
+    }
+
+    .divider {
+      width: 40px; height: 1px;
+      background: linear-gradient(to right, transparent, rgba(184,132,90,0.4), transparent);
+      margin: 2.5rem auto 0;
+    }
+
+    .features {
+      display: flex; gap: 28px; flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 2rem;
+    }
+
+    .feature {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; color: var(--muted);
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+
+    .feature-dot {
+      width: 4px; height: 4px; border-radius: 50%;
+      background: var(--accent); opacity: 0.7; flex-shrink: 0;
+    }
+
+    .loading {
+      display: none; position: fixed; inset: 0; z-index: 100;
+      background: var(--bg);
+      align-items: center; justify-content: center;
+      flex-direction: column; gap: 16px;
+    }
+
+    .loading.show { display: flex; }
+
+    .spinner {
+      width: 26px; height: 26px;
+      border: 1.5px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loading p {
+      font-size: 11px; color: var(--muted);
+      letter-spacing: 0.14em; text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="loading" id="loading">
+    <div class="spinner"></div>
+    <p>Brewing your article...</p>
+  </div>
+
+  <div class="page">
+    <div class="wordmark">
+      <span class="wordmark-d">D</span><span class="wordmark-reads">Reads</span>
+    </div>
+    <p class="tagline">Read anything. No noise.</p>
+
+    <div class="search-wrap">
+      <form class="search-inner" id="form" action="/proxy" method="GET">
+        <input
+          id="url-input"
+          name="url"
+          type="url"
+          placeholder="Paste an article URL..."
+          autocomplete="off"
+          spellcheck="false"
+          required
+        />
+        <button type="submit" class="go-btn">Read →</button>
+      </form>
+
+      <div class="hints">
+        <span class="hint">cosmopolitan.com</span>
+        <span class="hint">wired.com</span>
+        <span class="hint">nytimes.com</span>
+        <span class="hint">medium.com</span>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="features">
+      <div class="feature"><div class="feature-dot"></div>No ads</div>
+      <div class="feature"><div class="feature-dot"></div>No paywalls</div>
+      <div class="feature"><div class="feature-dot"></div>Links stay in reader</div>
+      <div class="feature"><div class="feature-dot"></div>Clean typography</div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('form');
+    const input = document.getElementById('url-input');
+    const loading = document.getElementById('loading');
+
+    document.querySelectorAll('.hint').forEach(h => {
+      h.addEventListener('click', () => {
+        input.value = 'https://www.' + h.textContent.trim();
+        input.focus();
+      });
+    });
+
+    form.addEventListener('submit', (e) => {
+      let val = input.value.trim();
+      if (!val) return;
+      if (!val.startsWith('http')) {
+        e.preventDefault();
+        input.value = 'https://' + val;
+        loading.classList.add('show');
+        form.submit();
+        return;
+      }
+      loading.classList.add('show');
+    });
+  </script>
+</body>
+</html>
