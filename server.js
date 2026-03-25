@@ -6,7 +6,7 @@ const path = require('path');
 
 const app = express();
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(__dirname));
 app.use(session({ secret: 'cleanreader-key', resave: false, saveUninitialized: true }));
 
 app.get('/proxy', async (req, res) => {
